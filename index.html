@@ -242,9 +242,35 @@
 
     let stalks    = [];
     let startTime = null;
+    let lastTime  = 0;
+    const MAX_STALKS = 130;
 
     function rand(a, b)    { return a + Math.random() * (b - a); }
     function randInt(a, b) { return Math.floor(rand(a, b + 1)); }
+
+    function makeStalk(x, depth, initRows) {
+      const maxRows = randInt(18, 36);
+      const rows    = initRows ?? maxRows;
+      return {
+        x, depth,
+        charSize:     8 + depth * 18,
+        opacity:      0.20 + depth * 0.80,
+        rows, maxRows,
+        segH:         randInt(3, 6),
+        swayPhase:    rand(0, Math.PI * 2),
+        swaySpeed:    rand(0.22, 0.62),
+        swayAmp:      rand(2.0, 5.0),
+        growRate:     rows < maxRows ? rand(1.0, 2.5) : 0,
+        spawnedChild: false,
+        spawnChildAt: null,
+      };
+    }
+
+    function spawnStalk(x, depth) {
+      if (stalks.length >= MAX_STALKS) return;
+      stalks.push(makeStalk(x, depth, 0));
+      stalks.sort((a, b) => a.depth - b.depth);
+    }
 
     // ── 숲 생성 ────────────────────────────────────────────────────
 
@@ -252,27 +278,14 @@
       canvas.width  = window.innerWidth;
       canvas.height = window.innerHeight;
       stalks = [];
-
       const spacing = window.innerWidth < 600 ? 38 : 52;
       const count   = Math.floor(window.innerWidth / spacing) + 6;
-
       for (let i = 0; i < count; i++) {
-        const x     = (i / count) * window.innerWidth + rand(-18, 18);
-        const depth = Math.random();
-
-        stalks.push({
-          x, depth,
-          height:       randInt(18, 36),
-          segH:         randInt(3, 6),
-          charSize:     8 + depth * 18,
-          opacity:      0.20 + depth * 0.80,
-          swayPhase:    rand(0, Math.PI * 2),
-          swaySpeed:    rand(0.22, 0.62),
-          swayAmp:      rand(2.0, 5.0),
-          leafInterval: randInt(2, 4),
-        });
+        stalks.push(makeStalk(
+          (i / count) * window.innerWidth + rand(-18, 18),
+          Math.random()
+        ));
       }
-
       stalks.sort((a, b) => a.depth - b.depth);
     }
 
@@ -280,12 +293,28 @@
 
     function drawForest(elapsed) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      const t = elapsed / 1000;
+      const t  = elapsed / 1000;
+      const dt = Math.min(t - lastTime, 0.1);
+      lastTime = t;
 
       for (const stalk of stalks) {
-        const { x, depth, charSize: cs, height, segH, opacity,
-                swayPhase, swaySpeed, swayAmp, leafInterval } = stalk;
+        if (stalk.rows < stalk.maxRows) {
+          stalk.rows = Math.min(stalk.maxRows, stalk.rows + stalk.growRate * dt);
+          if (!stalk.spawnedChild && stalk.rows >= stalk.maxRows * 0.7) {
+            stalk.spawnedChild = true;
+            stalk.spawnChildAt = t + rand(4, 10);
+          }
+        }
+        if (stalk.spawnChildAt !== null && t >= stalk.spawnChildAt) {
+          stalk.spawnChildAt = null;
+          const cx = Math.max(10, Math.min(canvas.width - 10, stalk.x + rand(-70, 70)));
+          spawnStalk(cx, Math.random());
+        }
 
+        const visRows = Math.floor(stalk.rows);
+        if (visRows < 1) continue;
+
+        const { x, depth, charSize: cs, segH, opacity, swayPhase, swaySpeed, swayAmp } = stalk;
         const sway  = Math.sin(t * swaySpeed + swayPhase) * swayAmp;
         const lh    = cs * 1.18;
         const baseY = canvas.height - 55;
@@ -296,32 +325,25 @@
         ctx.globalAlpha  = opacity;
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
+        ctx.font         = `${cs}px monospace`;
 
-        for (let row = 0; row < height; row++) {
-          const bx = x + sway * (row / height);
+        for (let row = 0; row < visRows; row++) {
+          const bx = x + sway * (row / visRows);
           const y  = baseY - row * lh;
           if (y < -lh) break;
-
           const isNode = row > 0 && row % segH === 0;
-          const isTop  = row === height - 1;
-
+          const isTop  = row === visRows - 1;
           if (isTop) {
-            ctx.font      = `${cs}px monospace`;
             ctx.fillStyle = `hsl(115,52%,${lgt + nd + 2}%)`;
             ctx.fillText('╲╱', bx, y);
-
           } else if (isNode) {
-            ctx.font      = `${cs}px monospace`;
             ctx.fillStyle = `hsl(118,48%,${lgt + nd}%)`;
             ctx.fillText('━', bx, y);
-
           } else {
-            ctx.font      = `${cs}px monospace`;
             ctx.fillStyle = `hsl(115,50%,${lgt}%)`;
             ctx.fillText('█', bx, y);
           }
         }
-
         ctx.restore();
       }
     }
@@ -390,6 +412,7 @@
       const text = input.value.trim();
       if (!text) return;
       launchCharacters(text, input.getBoundingClientRect());
+      spawnStalk(rand(canvas.width * 0.05, canvas.width * 0.95), Math.random());
       input.value = '';
       input.classList.add('flash');
       setTimeout(() => input.classList.remove('flash'), 130);
