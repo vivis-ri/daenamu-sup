@@ -284,8 +284,6 @@
         swaySpeed:    rand(0.22, 0.62),
         swayAmp:      rand(2.0, 5.0),
         growRate:     rows < maxRows ? rand(1.0, 2.5) : 0,
-        spawnedChild: false,
-        spawnChildAt: null,
       };
     }
 
@@ -323,15 +321,6 @@
       for (const stalk of stalks) {
         if (stalk.rows < stalk.maxRows) {
           stalk.rows = Math.min(stalk.maxRows, stalk.rows + stalk.growRate * dt);
-          if (!stalk.spawnedChild && stalk.rows >= stalk.maxRows * 0.7) {
-            stalk.spawnedChild = true;
-            stalk.spawnChildAt = t + rand(4, 10);
-          }
-        }
-        if (stalk.spawnChildAt !== null && t >= stalk.spawnChildAt) {
-          stalk.spawnChildAt = null;
-          const cx = Math.max(10, Math.min(canvas.width - 10, stalk.x + rand(-70, 70)));
-          spawnStalk(cx, Math.random());
         }
 
         const visRows = Math.floor(stalk.rows);
@@ -434,6 +423,8 @@
       if (e.key !== 'Enter' || e.isComposing) return;
       const text = input.value.trim();
       if (!text) return;
+      ensureAudio();
+      playWhoosh();
       launchCharacters(text, input.getBoundingClientRect());
       spawnStalk(rand(canvas.width * 0.05, canvas.width * 0.95), Math.random());
       input.value = '';
@@ -465,109 +456,120 @@
 
     const soundBtn = document.getElementById('sound-btn');
     let audioCtx   = null;
-    let masterGain = null;
+    let bgGain     = null;   // 바람 BGM (♩ 버튼으로 토글)
+    let fxGain     = null;   // 효과음 (항상 활성)
     let isSoundOn  = false;
 
-    function buildWindGraph() {
-      if (audioCtx) return;
+    function ensureAudio() {
+      if (audioCtx) {
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        return;
+      }
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const sr = audioCtx.sampleRate;
 
-      // ① 화이트 노이즈 버퍼 (3초, 루프)
-      const sr  = audioCtx.sampleRate;
+      bgGain = audioCtx.createGain();
+      bgGain.gain.value = 0;
+      bgGain.connect(audioCtx.destination);
+
+      fxGain = audioCtx.createGain();
+      fxGain.gain.value = 0.55;
+      fxGain.connect(audioCtx.destination);
+
+      // 화이트 노이즈 소스 (루프)
       const buf = audioCtx.createBuffer(1, sr * 3, sr);
       const d   = buf.getChannelData(0);
       for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-
       const noise = audioCtx.createBufferSource();
-      noise.buffer = buf;
-      noise.loop   = true;
+      noise.buffer = buf; noise.loop = true;
 
-      // ② 바람 레이어: 저역통과 + 고역통과로 부드러운 소음
+      // 바람: 저역통과 + LFO 스윕
       const lp = audioCtx.createBiquadFilter();
       lp.type = 'lowpass'; lp.frequency.value = 700; lp.Q.value = 0.6;
-
       const hp = audioCtx.createBiquadFilter();
       hp.type = 'highpass'; hp.frequency.value = 90;
 
-      // ③ LFO — 바람 세기 맥동 (매우 느림)
-      const lfo     = audioCtx.createOscillator();
-      lfo.type      = 'sine';
+      const lfo = audioCtx.createOscillator();
       lfo.frequency.value = 0.07;
+      const lfoAmp = audioCtx.createGain();
+      lfoAmp.gain.value = 180;
+      lfo.connect(lfoAmp); lfoAmp.connect(lp.frequency);
 
-      const lfoAmp  = audioCtx.createGain();
-      lfoAmp.gain.value = 180;          // 주파수를 ±180Hz 흔들기
-      lfo.connect(lfoAmp);
-      lfoAmp.connect(lp.frequency);
-
-      // ④ 스윕 LFO — 파도처럼 밀려오는 바람 볼륨
-      const swellLfo  = audioCtx.createOscillator();
-      swellLfo.type   = 'sine';
+      // 볼륨 맥동 LFO
+      const swellLfo = audioCtx.createOscillator();
       swellLfo.frequency.value = 0.04;
-
-      const swellBias = audioCtx.createGain();   // DC 오프셋 1.0
-      swellBias.gain.value = 1.0;
-
-      const swellDepth = audioCtx.createGain();
-      swellDepth.gain.value = 0.42;
-
       const windLayer = audioCtx.createGain();
       windLayer.gain.value = 1.0;
+      const swellDepth = audioCtx.createGain();
+      swellDepth.gain.value = 0.38;
+      swellLfo.connect(swellDepth); swellDepth.connect(windLayer.gain);
 
-      swellLfo.connect(swellDepth);
-      swellDepth.connect(windLayer.gain);
-
-      // ⑤ 사각거림 레이어: 중역대 노이즈 (잎/대나무 스침)
-      const rustleGain = audioCtx.createGain();
-      rustleGain.gain.value = 0.28;
-
+      // 사각거림 레이어
       const bp = audioCtx.createBiquadFilter();
       bp.type = 'bandpass'; bp.frequency.value = 1800; bp.Q.value = 2.0;
+      const rustleGain = audioCtx.createGain();
+      rustleGain.gain.value = 0.25;
 
-      // ⑥ 대나무 클락 (낮은 노치 버스트) — 주기적 발생
-      function scheduleClack(when) {
-        if (!audioCtx || !isSoundOn) return;
-        const b2 = audioCtx.createBuffer(1, Math.floor(sr * 0.05), sr);
-        const d2 = b2.getChannelData(0);
-        for (let i = 0; i < d2.length; i++) d2[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.006));
-        const clk = audioCtx.createBufferSource();
-        clk.buffer = b2;
-        const clkBp = audioCtx.createBiquadFilter();
-        clkBp.type = 'bandpass'; clkBp.frequency.value = 900 + Math.random() * 600; clkBp.Q.value = 8;
-        const clkGain = audioCtx.createGain();
-        clkGain.gain.value = 0.18 + Math.random() * 0.12;
-        clk.connect(clkBp); clkBp.connect(clkGain); clkGain.connect(masterGain);
-        clk.start(when);
-        const next = when + 2.5 + Math.random() * 5.5;
-        setTimeout(() => scheduleClack(audioCtx.currentTime + 2.5 + Math.random() * 5.5),
-          Math.max(0, (next - audioCtx.currentTime - 1) * 1000));
+      noise.connect(lp); lp.connect(hp); hp.connect(windLayer); windLayer.connect(bgGain);
+      noise.connect(bp); bp.connect(rustleGain); rustleGain.connect(bgGain);
+
+      noise.start(); lfo.start(); swellLfo.start();
+
+      // 대나무 클락 — 단순 setTimeout 루프
+      function clackLoop() {
+        if (isSoundOn && audioCtx) {
+          const len = Math.floor(sr * 0.07);
+          const cb  = audioCtx.createBuffer(1, len, sr);
+          const cd  = cb.getChannelData(0);
+          for (let i = 0; i < len; i++) cd[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sr * 0.009));
+          const src = audioCtx.createBufferSource();
+          src.buffer = cb;
+          const clkBp = audioCtx.createBiquadFilter();
+          clkBp.type = 'bandpass';
+          clkBp.frequency.value = 700 + Math.random() * 700;
+          clkBp.Q.value = 12;
+          const clkG = audioCtx.createGain();
+          clkG.gain.value = 0.5 + Math.random() * 0.3;
+          src.connect(clkBp); clkBp.connect(clkG); clkG.connect(bgGain);
+          src.start();
+        }
+        setTimeout(clackLoop, 2500 + Math.random() * 6000);
       }
+      setTimeout(clackLoop, 1500);
+    }
 
-      // ⑦ 마스터 게인 (음소거용)
-      masterGain = audioCtx.createGain();
-      masterGain.gain.value = 0;
+    // 슉~ 바람 효과음 (Enter 시)
+    function playWhoosh() {
+      if (!audioCtx) return;
+      const sr  = audioCtx.sampleRate;
+      const dur = 0.75;
+      const buf = audioCtx.createBuffer(1, Math.floor(sr * dur), sr);
+      const d   = buf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      const src = audioCtx.createBufferSource();
+      src.buffer = buf;
 
-      // 연결
-      noise.connect(lp); lp.connect(hp); hp.connect(windLayer);
-      windLayer.connect(masterGain);
+      const lp = audioCtx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.setValueAtTime(3800, audioCtx.currentTime);
+      lp.frequency.exponentialRampToValueAtTime(180, audioCtx.currentTime + dur);
 
-      noise.connect(bp); bp.connect(rustleGain);
-      rustleGain.connect(masterGain);
+      const hp = audioCtx.createBiquadFilter();
+      hp.type = 'highpass'; hp.frequency.value = 80;
 
-      masterGain.connect(audioCtx.destination);
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(0, audioCtx.currentTime);
+      g.gain.linearRampToValueAtTime(0.55, audioCtx.currentTime + 0.04);
+      g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
 
-      noise.start();
-      lfo.start();
-      swellLfo.start();
-
-      setTimeout(() => scheduleClack(audioCtx.currentTime + 1), 100);
+      src.connect(hp); hp.connect(lp); lp.connect(g); g.connect(fxGain);
+      src.start();
     }
 
     soundBtn.addEventListener('click', () => {
-      buildWindGraph();
-      if (audioCtx.state === 'suspended') audioCtx.resume();
+      ensureAudio();
       isSoundOn = !isSoundOn;
-      const target = isSoundOn ? 0.22 : 0;
-      masterGain.gain.setTargetAtTime(target, audioCtx.currentTime, 1.2);
+      bgGain.gain.setTargetAtTime(isSoundOn ? 0.22 : 0, audioCtx.currentTime, 1.2);
       soundBtn.textContent = isSoundOn ? '♪' : '♩';
     });
 
